@@ -1,7 +1,9 @@
 "use client";
 
 import { mockCase } from "../data/mock-case";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { createCaseEvent, getCase } from "../lib/case-api";
+import { adaptCaseResponse } from "../lib/case-adapter";
 
 import {
   AlertTriangle,
@@ -14,6 +16,17 @@ import {
 } from "lucide-react";
 
 export default function Home() {
+  const [caseData, setCaseData] = useState(mockCase);
+
+  useEffect(() => {
+    getCase("CG-001")
+      .then((data) => {
+        setCaseData(adaptCaseResponse(data));
+      })
+      .catch(() => {
+        setCaseData(mockCase);
+      });
+  }, []);
   const [replanning, setReplanning] = useState(false);
   const [replanStep, setReplanStep] = useState(0);
   const [decision, setDecision] = useState<string | null>(null);
@@ -25,18 +38,30 @@ export default function Home() {
     "Transactions cross-checked",
     "Evidence package prepared",
   ];
-  function startReplanning() {
-    if (replanning) return;
-
+  const startReplanning = async () => {
     setReplanning(true);
     setReplanStep(0);
 
-    replanSteps.forEach((_, index) => {
-      setTimeout(() => {
-        setReplanStep(index + 1);
-      }, (index + 1) * 900);
-    });
-  }
+    try {
+      await createCaseEvent(
+        "CG-001",
+        "BANK_EVIDENCE_REQUEST",
+        "Additional evidence required.",
+      );
+
+      for (let i = 0; i < replanSteps.length; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        setReplanStep(i + 1);
+      }
+
+      const latest = await getCase("CG-001");
+      setCaseData(adaptCaseResponse(latest));
+      setReplanning(false);
+    } catch (error) {
+      console.error("Replanning failed:", error);
+      setReplanning(false);
+    }
+  };
 
   function resetReplanning() {
     setReplanning(false);
@@ -73,7 +98,7 @@ export default function Home() {
               <p className="text-xs uppercase tracking-widest text-slate-500">
                 Case
               </p>
-              <h2 className="mt-1 text-lg font-semibold">#{mockCase.caseId}</h2>
+              <h2 className="mt-1 text-lg font-semibold">#{caseData.caseId}</h2>
             </div>
 
             <div className="flex items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2">
@@ -85,11 +110,11 @@ export default function Home() {
           </div>
 
           <div className="grid grid-cols-2 divide-x divide-slate-800 sm:grid-cols-5">
-            <Stat label="Risk" value={mockCase.risk} danger />
-            <Stat label="Disputed" value={mockCase.disputedAmount} />
-            <Stat label="Transactions" value={mockCase.transactions} />
-            <Stat label="Evidence" value={mockCase.evidence} />
-            <Stat label="Status" value={mockCase.status} />
+            <Stat label="Risk" value={caseData.risk} danger />
+            <Stat label="Disputed" value={caseData.disputedAmount} />
+            <Stat label="Transactions" value={caseData.transactions} />
+            <Stat label="Evidence" value={caseData.evidence} />
+            <Stat label="Status" value={caseData.status} />
           </div>
         </section>
 
@@ -105,7 +130,7 @@ export default function Home() {
             </div>
 
             <div className="divide-y divide-slate-800/70">
-              {mockCase.agents.map((agent) => (
+              {caseData.agents.map((agent) => (
                 <div
                   key={agent.name}
                   className="flex items-center justify-between px-5 py-3"
@@ -132,7 +157,7 @@ export default function Home() {
             </div>
 
             <div className="space-y-1 p-5">
-              {mockCase.timeline.map((event) => (
+              {caseData.timeline.map((event) => (
                 <div
                   key={event.time}
                   className="grid gap-1 rounded-lg px-3 py-3 hover:bg-slate-800/30 sm:grid-cols-[75px_100px_1fr] sm:gap-3"
@@ -166,9 +191,9 @@ export default function Home() {
             </div>
 
             <div className="space-y-3 p-5">
-              {mockCase.findings.map((finding) => (
+              {caseData.findings.map((finding, index) => (
                 <div
-                  key={finding}
+                  key={`${finding}-${index}`}
                   className="flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/40 p-3"
                 >
                   <AlertTriangle className="h-4 w-4 text-amber-400" />
@@ -188,7 +213,7 @@ export default function Home() {
             </div>
 
             <div className="space-y-3 p-5">
-              {mockCase.verification.map((item) => (
+              {caseData.verification.map((item) => (
                 <div
                   key={item}
                   className="flex items-center justify-between rounded-lg border border-emerald-500/10 bg-emerald-500/5 p-3"
@@ -308,13 +333,17 @@ export default function Home() {
 
             <div className="rounded-lg border border-slate-800 bg-black/20 p-4">
               <p className="mb-4 font-mono text-xs font-bold uppercase tracking-widest text-cyan-400">
-                {replanning ? "REPLANNING..." : "Waiting for event"}
+                {replanning
+                  ? "REPLANNING..."
+                  : replanStep === replanSteps.length
+                    ? "REPLANNING COMPLETE"
+                    : "WAITING FOR EVENT"}
               </p>
 
               <div className="space-y-3">
                 {replanSteps.map((step, index) => (
                   <ReplanStep
-                    key={step}
+                    key={`${step}-${index}`}
                     text={step}
                     active={replanStep > index}
                   />
@@ -341,9 +370,7 @@ export default function Home() {
         </section>
       </div>
 
-      {showEvidence && (
-        <EvidenceModal onClose={() => setShowEvidence(false)} />
-      )}
+      {showEvidence && <EvidenceModal onClose={() => setShowEvidence(false)} />}
     </main>
   );
 }
@@ -365,7 +392,10 @@ function EvidenceModal({ onClose }: { onClose: () => void }) {
             <p className="text-xs uppercase tracking-widest text-cyan-400">
               Evidence Package · CG-001
             </p>
-            <h2 id="evidence-title" className="mt-1 text-lg font-semibold text-white">
+            <h2
+              id="evidence-title"
+              className="mt-1 text-lg font-semibold text-white"
+            >
               Review before action
             </h2>
           </div>
@@ -385,18 +415,29 @@ function EvidenceModal({ onClose }: { onClose: () => void }) {
               Investigation summary
             </p>
             <p className="mt-2 text-sm leading-6 text-slate-300">
-              ₹60,700 disputed across 3 suspicious ATM withdrawals. The
-              evidence chain has been reconstructed and the transaction
-              details have been verified.
+              ₹60,700 disputed across 3 suspicious ATM withdrawals. The evidence
+              chain has been reconstructed and the transaction details have been
+              verified.
             </p>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-3">
-            {['E01 · Bank Statement', 'E02 · SMS Screenshot', 'E03 · Complaint Acknowledgement'].map((item) => (
-              <div key={item} className="rounded-lg border border-slate-800 bg-slate-900/50 p-3">
+            {[
+              "E01 · Bank Statement",
+              "E02 · SMS Screenshot",
+              "E03 · Complaint Acknowledgement",
+            ].map((item) => (
+              <div
+                key={item}
+                className="rounded-lg border border-slate-800 bg-slate-900/50 p-3"
+              >
                 <FileCheck2 className="h-4 w-4 text-emerald-400" />
-                <p className="mt-2 text-xs font-medium text-slate-300">{item}</p>
-                <p className="mt-1 text-[10px] uppercase tracking-wider text-emerald-400">Verified</p>
+                <p className="mt-2 text-xs font-medium text-slate-300">
+                  {item}
+                </p>
+                <p className="mt-1 text-[10px] uppercase tracking-wider text-emerald-400">
+                  Verified
+                </p>
               </div>
             ))}
           </div>
