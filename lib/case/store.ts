@@ -22,13 +22,19 @@ type DatabaseResponse<T> = {
   error: { message: string; code?: string } | null;
 };
 
+type DatabaseInsertQuery = PromiseLike<DatabaseResponse<unknown>> & {
+  select: (columns?: string) => {
+    single: () => PromiseLike<DatabaseResponse<Record<string, unknown>>>;
+  };
+};
+
 type DatabaseQuery = {
   select: (columns?: string) => DatabaseQuery;
   eq: (column: string, value: string) => DatabaseQuery;
   limit: (count: number) => PromiseLike<DatabaseResponse<Record<string, unknown>[]>>;
   insert: (
     values: Record<string, unknown> | Record<string, unknown>[],
-  ) => PromiseLike<DatabaseResponse<unknown>>;
+  ) => DatabaseInsertQuery;
 };
 
 type DatabaseClient = {
@@ -37,12 +43,13 @@ type DatabaseClient = {
 
 type CaseStoreGlobal = typeof globalThis & {
   __caseguardCaseCache?: Map<string, CaseState>;
+  __caseguardDatabaseCaseIds?: Map<string, string | null>;
 };
 
 const globalStore = globalThis as CaseStoreGlobal;
 const caseCache = (globalStore.__caseguardCaseCache ??= new Map());
+const databaseCaseIds = (globalStore.__caseguardDatabaseCaseIds ??= new Map());
 const tableNames = [
-  "cases",
   "transactions",
   "evidence",
   "agent_runs",
@@ -94,33 +101,35 @@ function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
 }
 
 function normalizeTransaction(row: Record<string, unknown>): CaseTransaction | null {
-  const amount = numeric(row.amount ?? row.transaction_amount, Number.NaN);
+  const amount = numeric(row.amount, Number.NaN);
   if (!Number.isFinite(amount)) return null;
-  const rawTime = text(row.time ?? row.transaction_time ?? row.occurred_at ?? row.created_at);
+  const rawTime = text(row.transaction_time ?? row.created_at);
   const timeMatch = rawTime.match(/\b(\d{2}:\d{2})/);
-  const disputed = row.disputed ?? row.is_disputed;
+  const disputed = row.disputed;
+  const metadata = record(row.metadata) ?? {};
   return {
-    id: text(row.transaction_id ?? row.id, `TX-${crypto.randomUUID()}`),
+    id: text(row.id, `TX-${crypto.randomUUID()}`),
     time: timeMatch?.[1] ?? rawTime,
     amount,
-    currency: "INR",
-    channel: text(row.channel ?? row.type ?? row.transaction_type, "ATM"),
-    account: text(row.account ?? row.account_number, syntheticCase.account),
+    currency: text(row.currency, "INR") as "INR",
+    channel: text(row.channel ?? row.transaction_type, "ATM"),
+    account: text(metadata.account, syntheticCase.account),
     disputed: typeof disputed === "boolean" ? disputed : true,
-    classification: text(row.classification),
+    classification: text(metadata.classification),
   };
 }
 
 function normalizeEvidence(row: Record<string, unknown>): CaseEvidence | null {
-  const evidenceId = text(row.evidence_id ?? row.reference ?? row.code ?? row.id);
-  const title = text(row.title ?? row.name ?? row.evidence_type);
+  const metadata = record(row.metadata) ?? {};
+  const evidenceId = text(metadata.demo_evidence_id ?? row.id);
+  const title = text(row.name);
   if (!evidenceId || !title) return null;
-  const related = row.transaction_ids ?? row.transactionIds;
+  const related = metadata.transactionIds;
   return {
     id: evidenceId,
     title,
-    kind: text(row.kind ?? row.type ?? row.evidence_type, "case_evidence"),
-    description: text(row.description ?? row.content ?? row.notes),
+    kind: text(row.evidence_type, "case_evidence"),
+    description: text(row.description),
     transactionIds: list(related).filter((id): id is string => typeof id === "string"),
     verified: row.verified === true,
   };
@@ -138,7 +147,7 @@ function normalizeFinding(row: Record<string, unknown>): InvestigationFinding | 
       ? (severity as InvestigationFinding["severity"])
       : "medium",
     confidence: numeric(row.confidence, 0.5),
-    sourceAgent: text(row.source_agent ?? row.agent_name, "investigation") as AgentName,
+    sourceAgent: text(row.finding_type, "investigation") as AgentName,
     evidenceIds: list(row.evidence_ids).filter((id): id is string => typeof id === "string"),
     createdAt: text(row.created_at, new Date(0).toISOString()),
   };
@@ -147,7 +156,7 @@ function normalizeFinding(row: Record<string, unknown>): InvestigationFinding | 
 function normalizeTask(row: Record<string, unknown>): AgentTask | null {
   const title = text(row.title ?? row.task);
   if (!title) return null;
-  const agent = text(row.agent ?? row.agent_name ?? row.assigned_agent, "supervisor");
+  const agent = text(row.assigned_agent, "supervisor");
   const status = text(row.status, "pending");
   return {
     id: text(row.task_id ?? row.id, `task-${title}`),
@@ -163,13 +172,13 @@ function normalizeTask(row: Record<string, unknown>): AgentTask | null {
 }
 
 function normalizeAction(row: Record<string, unknown>): RecommendedAction | null {
-  const title = text(row.title ?? row.action);
+  const title = text(row.title);
   if (!title) return null;
-  const approval = row.requires_human_approval === true || row.approval === "required"
+  const approval = row.requires_approval === true
     ? "required"
     : "not_required";
   const status = text(row.status, approval === "required" ? "pending_approval" : "prepared");
-  const category = text(row.category, "review");
+  const category = text(row.action_type, "review");
   return {
     id: text(row.action_id ?? row.id, `action-${title}`),
     title,
@@ -187,24 +196,22 @@ function normalizeAction(row: Record<string, unknown>): RecommendedAction | null
 }
 
 function normalizeVerification(row: Record<string, unknown>): VerificationResult | null {
-  const check = text(row.check ?? row.check_name);
-  if (!check) return null;
-  const status = text(row.status, "needs_review");
+  const status = text(row.verification_status, "needs_review");
   return {
-    id: text(row.id, `verification-${check}`),
-    check,
+    id: text(row.id, `verification-${status}`),
+    check: "Persisted verification status",
     status: ["verified", "failed", "needs_review"].includes(status)
       ? (status as VerificationResult["status"])
       : "needs_review",
-    expected: text(row.expected),
-    actual: text(row.actual),
-    details: text(row.details),
-    evidenceIds: list(row.evidence_ids).filter((id): id is string => typeof id === "string"),
+    expected: "",
+    actual: "",
+    details: "Only verification_status is stored by the existing database schema.",
+    evidenceIds: [],
     createdAt: text(row.created_at, new Date(0).toISOString()),
   };
 }
 
-function normalizeEvent(row: Record<string, unknown>): CaseEvent | null {
+function normalizeEvent(row: Record<string, unknown>, caseId: string): CaseEvent | null {
   const eventType = text(row.event_type ?? row.type);
   if (!eventType) return null;
   const metadata = record(row.metadata) ?? {};
@@ -213,9 +220,9 @@ function normalizeEvent(row: Record<string, unknown>): CaseEvent | null {
       row.demo_event_id ?? metadata.demo_event_id ?? row.event_id ?? row.id,
       `event-${crypto.randomUUID()}`,
     ),
-    caseId: text(row.case_id, syntheticCase.caseId),
+    caseId,
     eventType,
-    description: text(row.description ?? row.message),
+    description: text(row.message),
     metadata,
     createdAt: text(row.created_at, new Date(0).toISOString()),
   };
@@ -246,14 +253,14 @@ function normalizeAgentRun(row: Record<string, unknown>): AgentResult | null {
 async function readTable(
   client: CaseDatabaseClient,
   table: (typeof tableNames)[number],
-  caseId: string,
+  databaseCaseId: string,
   warnings: PersistenceWarning[],
 ): Promise<Record<string, unknown>[]> {
   try {
     const response = await db(client)
       .from(table)
       .select("*")
-      .eq("case_id", caseId)
+      .eq("case_id", databaseCaseId)
       .limit(500);
     if (response.error) {
       warnings.push({ table, message: response.error.message });
@@ -267,6 +274,79 @@ async function readTable(
     });
     return [];
   }
+}
+
+async function findCaseRow(
+  client: CaseDatabaseClient,
+  caseNumber: string,
+  warnings: PersistenceWarning[],
+): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await db(client)
+      .from("cases")
+      .select("*")
+      .eq("case_number", caseNumber)
+      .limit(1);
+    if (response.error) {
+      warnings.push({ table: "cases", message: response.error.message });
+      return null;
+    }
+    return response.data?.[0] ?? null;
+  } catch (error) {
+    warnings.push({
+      table: "cases",
+      message: error instanceof Error ? error.message : "Unknown Supabase case lookup error.",
+    });
+    return null;
+  }
+}
+
+async function resolveDatabaseCaseId(
+  client: CaseDatabaseClient,
+  caseNumber: string,
+  warnings: PersistenceWarning[],
+): Promise<string | null> {
+  const cachedCaseId = databaseCaseIds.get(caseNumber);
+  if (cachedCaseId) return cachedCaseId;
+
+  let caseRow = await findCaseRow(client, caseNumber, warnings);
+  if (typeof caseRow?.id !== "string" && !warnings.some((warning) => warning.table === "cases")) {
+    if (caseNumber === syntheticCase.caseId && process.env.CASEGUARD_DEMO_MODE === "true") {
+      try {
+        const response = await db(client)
+          .from("cases")
+          .insert({ case_number: caseNumber, status: "open" })
+          .select("id,case_number,status")
+          .single();
+        if (response.error) {
+          warnings.push({ table: "cases", message: response.error.message });
+        } else {
+          caseRow = response.data;
+        }
+      } catch (error) {
+        warnings.push({
+          table: "cases",
+          message: error instanceof Error ? error.message : "Unknown Supabase case insert error.",
+        });
+      }
+    }
+  }
+
+  if (typeof caseRow?.id === "string") {
+    databaseCaseIds.set(caseNumber, caseRow.id);
+    return caseRow.id;
+  }
+
+  if (
+    caseNumber === syntheticCase.caseId &&
+    !warnings.some((warning) => warning.table === "cases")
+  ) {
+    warnings.push({
+      table: "cases",
+      message: `No database UUID is available for case number ${caseNumber}; child records were not persisted.`,
+    });
+  }
+  return null;
 }
 
 export class CaseNotFoundError extends Error {
@@ -293,20 +373,23 @@ export async function loadCaseState(
   caseId: string,
 ): Promise<LoadedCase> {
   const warnings: PersistenceWarning[] = [];
+  const caseRow = await findCaseRow(client, caseId, warnings);
+  const databaseCaseId = typeof caseRow?.id === "string"
+    ? (databaseCaseIds.set(caseId, caseRow.id), caseRow.id)
+    : await resolveDatabaseCaseId(client, caseId, warnings);
   const tables = await Promise.all(
     tableNames.map(async (table) => [
       table,
-      await readTable(client, table, caseId, warnings),
+      databaseCaseId ? await readTable(client, table, databaseCaseId, warnings) : [],
     ] as const),
   );
   const rows = Object.fromEntries(tables) as Record<
     (typeof tableNames)[number],
     Record<string, unknown>[]
   >;
-  const caseRow = rows.cases[0];
   const cached = caseId === syntheticCase.caseId ? caseCache.get(caseId) : undefined;
 
-  if (caseId !== syntheticCase.caseId && !caseRow && !cached) {
+  if (caseId !== syntheticCase.caseId && !databaseCaseId && !cached) {
     const caseReadFailure = warnings.find((warning) => warning.table === "cases");
     if (caseReadFailure) throw new CaseDatabaseError(caseReadFailure.message);
     throw new CaseNotFoundError(caseId);
@@ -346,7 +429,7 @@ export async function loadCaseState(
     .map(normalizeVerification)
     .filter((item): item is VerificationResult => Boolean(item));
   const databaseEvents = rows.case_events
-    .map(normalizeEvent)
+    .map((row) => normalizeEvent(row, caseId))
     .filter((item): item is CaseEvent => Boolean(item));
   const databaseRuns = rows.agent_runs
     .map(normalizeAgentRun)
@@ -432,27 +515,40 @@ export async function persistAgentRun(
   assignedTask: AgentTask,
   result: AgentResult,
 ): Promise<PersistenceWarning[]> {
+  const databaseCaseId = databaseCaseIds.get(run.case_id);
+  if (!databaseCaseId) return [];
+
   const warnings: PersistenceWarning[] = [];
-  const runWarning = await insertRecord(client, "agent_runs", run as unknown as Record<string, unknown>);
+  const runWarning = await insertRecord(client, "agent_runs", {
+    case_id: databaseCaseId,
+    agent_name: run.agent_name,
+    task: run.task,
+    input: run.input,
+    output: run.output,
+    status: run.status,
+    started_at: run.started_at,
+    completed_at: run.completed_at,
+    error_message: run.error,
+  });
   if (runWarning) warnings.push(runWarning);
 
   const createdAt = new Date().toISOString();
   const taskRows = [
     {
-      case_id: run.case_id,
-      task: assignedTask.title,
-      agent_name: assignedTask.agent,
+      case_id: databaseCaseId,
+      title: assignedTask.title,
+      assigned_agent: assignedTask.agent,
       status: "completed",
-      details: assignedTask.description,
+      description: assignedTask.description,
       created_at: assignedTask.createdAt,
       completed_at: assignedTask.completedAt ?? run.completed_at,
     },
     ...result.tasks.map((item) => ({
-      case_id: run.case_id,
-      task: item.title,
-      agent_name: item.agent,
+      case_id: databaseCaseId,
+      title: item.title,
+      assigned_agent: item.agent,
       status: item.status,
-      details: item.description,
+      description: item.description,
       created_at: item.createdAt || createdAt,
       completed_at: item.completedAt ?? null,
     })),
@@ -462,12 +558,12 @@ export async function persistAgentRun(
     ...result.findings.map((item) => [
       "findings",
       {
-        case_id: run.case_id,
+        case_id: databaseCaseId,
         title: item.title,
         description: item.description,
         severity: item.severity,
         confidence: item.confidence,
-        source_agent: item.sourceAgent,
+        finding_type: item.sourceAgent,
         evidence_ids: item.evidenceIds,
         created_at: item.createdAt,
       },
@@ -475,26 +571,20 @@ export async function persistAgentRun(
     ...result.actions.map((item) => [
       "actions",
       {
-        case_id: run.case_id,
+        case_id: databaseCaseId,
         title: item.title,
         description: item.description,
-        category: item.category,
-        requires_human_approval: item.approval === "required",
+        action_type: item.category,
+        requires_approval: item.approval === "required",
         status: item.status,
-        evidence_ids: item.evidenceIds,
         created_at: item.createdAt,
       },
     ] as [string, Record<string, unknown>]),
     ...((result.data?.verifications as VerificationResult[] | undefined) ?? []).map((item) => [
       "verification_results",
       {
-        case_id: run.case_id,
-        check_name: item.check,
-        status: item.status,
-        expected: item.expected,
-        actual: item.actual,
-        details: item.details,
-        evidence_ids: item.evidenceIds,
+        case_id: databaseCaseId,
+        verification_status: item.status,
         created_at: item.createdAt,
       },
     ] as [string, Record<string, unknown>]),
@@ -509,13 +599,13 @@ export async function persistAgentRun(
     writes.push([
       "evidence",
       {
-        case_id: run.case_id,
-        evidence_id: packageId,
-        title: "Verified Evidence Package",
-        kind: "verified_evidence_package",
+        case_id: databaseCaseId,
+        name: "Verified Evidence Package",
+        evidence_type: "verified_evidence_package",
+        source: "synthetic_demo",
         description: `E01 Bank Statement cross-checked against ${transactionIds.length} disputed transactions totaling INR ${numeric(evidencePackage.disputedAmount, 0).toLocaleString("en-IN")}. Prepared for human review; not submitted externally.`,
-        transaction_ids: transactionIds,
         verified: true,
+        metadata: { demo_evidence_id: packageId, transactionIds },
         created_at: createdAt,
       },
     ]);
@@ -532,10 +622,13 @@ export async function persistCaseEvent(
   client: CaseDatabaseClient,
   event: CaseEvent,
 ): Promise<PersistenceWarning[]> {
+  const databaseCaseId = databaseCaseIds.get(event.caseId);
+  if (!databaseCaseId) return [];
+
   const warning = await insertRecord(client, "case_events", {
-    case_id: event.caseId,
+    case_id: databaseCaseId,
     event_type: event.eventType,
-    description: event.description,
+    message: event.description,
     metadata: { ...event.metadata, demo_event_id: event.id },
     created_at: event.createdAt,
   });
