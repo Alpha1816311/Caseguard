@@ -6,9 +6,9 @@ import type { CaseEvent } from "@/lib/types/agents";
 
 export async function POST(request: Request) {
   try {
-    const client = await requireApiClient();
     const body = await readJson(request);
     const caseId = parseCaseId(body.caseId ?? CASE_ID);
+    const client = await requireApiClient(caseId);
     const eventType = body.eventType ?? body.type;
     const description = body.description ?? body.message;
     if (
