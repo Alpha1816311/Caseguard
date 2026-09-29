@@ -4,9 +4,9 @@ import { investigateCase } from "@/lib/orchestration/engine";
 
 export async function POST(request: Request) {
   try {
-    const client = await requireApiClient();
     const body = await readJson(request);
     const caseId = parseCaseId(body.caseId ?? CASE_ID);
+    const client = await requireApiClient(caseId);
     const outcome = await investigateCase(client, caseId);
     return Response.json(
       {

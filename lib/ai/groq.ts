@@ -67,7 +67,7 @@ export async function generateAgentNarrative(input: {
   try {
     const client = new Groq({ apiKey, timeout: 3_000, maxRetries: 0 });
     const completion = await client.chat.completions.create({
-      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+      model: process.env.GROQ_MODEL || "openai/gpt-oss-20b",
       temperature: 0,
       max_tokens: 300,
       response_format: { type: "json_object" },

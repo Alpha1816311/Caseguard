@@ -1,4 +1,5 @@
 import { CaseDatabaseError, CaseNotFoundError } from "@/lib/case/store";
+import { CASE_ID } from "@/lib/case/synthetic";
 import { createClient } from "@/lib/supabase/server";
 
 export class ApiError extends Error {
@@ -11,7 +12,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function requireApiClient() {
+export async function requireApiClient(caseId?: string) {
   if (
     !process.env.NEXT_PUBLIC_SUPABASE_URL ||
     !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
@@ -26,14 +27,18 @@ export async function requireApiClient() {
     throw new ApiError("Supabase server client could not be initialized.", 503);
   }
 
-  try {
-    const { data, error } = await client.auth.getClaims();
-    if (error || typeof data?.claims?.sub !== "string") {
-      throw new ApiError("Authentication is required for this API.", 401);
+  const isDemoCase =
+    process.env.CASEGUARD_DEMO_MODE === "true" && caseId === CASE_ID;
+  if (!isDemoCase) {
+    try {
+      const { data, error } = await client.auth.getClaims();
+      if (error || typeof data?.claims?.sub !== "string") {
+        throw new ApiError("Authentication is required for this API.", 401);
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError("Supabase authentication could not be verified.", 503);
     }
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    throw new ApiError("Supabase authentication could not be verified.", 503);
   }
 
   return client;

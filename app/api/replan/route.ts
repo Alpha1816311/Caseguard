@@ -5,9 +5,9 @@ import { hasPendingReplan, replanCase } from "@/lib/orchestration/engine";
 
 export async function POST(request: Request) {
   try {
-    const client = await requireApiClient();
     const body = await readJson(request);
     const caseId = parseCaseId(body.caseId ?? CASE_ID);
+    const client = await requireApiClient(caseId);
     const { state } = await loadCaseState(client, caseId);
     if (!hasPendingReplan(state)) {
       throw new ApiError("There is no unprocessed bank-response event to replan.", 409);
