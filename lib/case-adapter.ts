@@ -29,6 +29,11 @@ type BackendCaseResponse = {
       eventType?: string;
       description?: string;
       createdAt?: string;
+      metadata?: {
+        agentName?: string;
+        message?: string;
+        triggerEventId?: string;
+      };
     }>;
 
     agentResults: Array<{
@@ -115,6 +120,52 @@ export function adaptCaseResponse(data: BackendCaseResponse) {
           }: ₹${transaction.amount.toLocaleString("en-IN")}`,
         }));
 
+  const bankResponseEvent = [...caseData.events]
+    .reverse()
+    .find((event) =>
+      ["bank_response", "BANK_RESPONSE_RECEIVED"].includes(event.eventType ?? ""),
+    );
+  const replanningEvents = bankResponseEvent
+    ? caseData.events.filter(
+        (event) =>
+          event.id === bankResponseEvent.id ||
+          event.metadata?.triggerEventId === bankResponseEvent.id,
+      )
+    : [];
+  const replanningTimeline = replanningEvents.map((event) => {
+    const timestamp = event.createdAt ? new Date(event.createdAt) : null;
+    return {
+      time:
+        timestamp && !Number.isNaN(timestamp.getTime())
+          ? timestamp.toLocaleTimeString("en-GB", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "--:--",
+      agent: event.metadata?.agentName ?? "Bank",
+      message:
+        event.metadata?.message ?? event.description ?? event.eventType ?? "Case event",
+      eventType: event.eventType,
+    };
+  });
+  const replanSteps = [
+    "EVIDENCE_SEARCHED",
+    "EVIDENCE_FOUND",
+    "TRANSACTION_CROSSCHECK",
+    "EVIDENCE_PACKAGE_PREPARED",
+  ];
+  const replanningEventTypes = new Set(
+    replanningEvents.map((event) => event.eventType),
+  );
+  const replanStep = replanSteps.reduce(
+    (completed, eventType) =>
+      completed === replanSteps.indexOf(eventType) &&
+      replanningEventTypes.has(eventType)
+        ? completed + 1
+        : completed,
+    0,
+  );
+
   const verification =
     verificationAgent?.data?.verifications
       ?.filter((item) => item.status === "verified")
@@ -161,7 +212,8 @@ export function adaptCaseResponse(data: BackendCaseResponse) {
 
     agents,
 
-    timeline,
+    timeline: [...timeline, ...replanningTimeline],
+    replanStep,
 
     findings,
 

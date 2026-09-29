@@ -12,8 +12,7 @@ export async function getCase(caseId: string) {
 
 export async function createCaseEvent(
   caseId: string,
-  eventType: string,
-  message: string,
+  description: string,
 ) {
   const response = await fetch("/api/events", {
     method: "POST",
@@ -21,16 +20,16 @@ export async function createCaseEvent(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-  caseId,
-  eventType: "bank_response",
-  message,
-}),
+      caseId,
+      eventType: "bank_response",
+      description,
+    }),
   });
 
   if (!response.ok) {
-  const error = await response.text();
-  throw new Error(`Failed to create event: ${response.status} ${error}`);
-}
+    const error = await response.text();
+    throw new Error(`Failed to create event: ${response.status} ${error}`);
+  }
 
   return response.json();
 }

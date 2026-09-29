@@ -45,17 +45,13 @@ export default function Home() {
     try {
       await createCaseEvent(
         "CG-001",
-        "BANK_EVIDENCE_REQUEST",
         "Additional evidence required.",
       );
 
-      for (let i = 0; i < replanSteps.length; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 700));
-        setReplanStep(i + 1);
-      }
-
       const latest = await getCase("CG-001");
-      setCaseData(adaptCaseResponse(latest));
+      const updatedCase = adaptCaseResponse(latest);
+      setCaseData(updatedCase);
+      setReplanStep(updatedCase.replanStep);
       setReplanning(false);
     } catch (error) {
       console.error("Replanning failed:", error);
@@ -63,9 +59,15 @@ export default function Home() {
     }
   };
 
-  function resetReplanning() {
-    setReplanning(false);
-    setReplanStep(0);
+  async function refreshCaseEvents() {
+    try {
+      const latest = await getCase("CG-001");
+      const updatedCase = adaptCaseResponse(latest);
+      setCaseData(updatedCase);
+      setReplanStep(updatedCase.replanStep);
+    } catch (error) {
+      console.error("Case refresh failed:", error);
+    }
   }
   return (
     <main className="min-h-screen bg-[#080b10] text-slate-100">
@@ -159,7 +161,7 @@ export default function Home() {
             <div className="space-y-1 p-5">
               {caseData.timeline.map((event) => (
                 <div
-                  key={event.time}
+                  key={`${event.time}-${event.message}`}
                   className="grid gap-1 rounded-lg px-3 py-3 hover:bg-slate-800/30 sm:grid-cols-[75px_100px_1fr] sm:gap-3"
                 >
                   <span className="font-mono text-xs text-slate-500">
@@ -358,10 +360,10 @@ export default function Home() {
                   </div>
                   <button
                     type="button"
-                    onClick={resetReplanning}
+                    onClick={refreshCaseEvents}
                     className="text-left text-xs font-semibold text-slate-500 transition hover:text-slate-300 sm:text-right"
                   >
-                    Replay demo sequence
+                    Refresh case events
                   </button>
                 </div>
               )}
