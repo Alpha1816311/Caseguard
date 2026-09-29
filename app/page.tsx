@@ -25,12 +25,14 @@ type IntakeData = {
   transactionIds: string;
   description: string;
   evidence: string;
+  caseId?: string;
+  caseUuid?: string;
 };
 
-function buildPendingCase() {
+function buildPendingCase(caseId = "NEW CASE") {
   return {
     ...mockCase,
-    caseId: "NEW CASE",
+    caseId,
     risk: "PENDING",
     status: "NEW",
     agents: mockCase.agents.map((agent) => ({
@@ -59,58 +61,78 @@ export default function Home() {
   const [showEvidence, setShowEvidence] = useState(false);
 
   useEffect(() => {
-    /*
-     * Temporary intake handoff.
-     * Later this will be replaced by the real Supabase case ID.
-     */
-    const stored = sessionStorage.getItem("caseguard-intake");
+    let cancelled = false;
 
-    if (stored) {
+    async function loadDashboardCase() {
+      let intake: IntakeData | null = null;
+
       try {
-        const parsed = JSON.parse(stored) as IntakeData;
+        const raw = sessionStorage.getItem("caseguard-intake");
 
-        setIntakeData(parsed);
+        if (raw) {
+          intake = JSON.parse(raw) as IntakeData;
 
-        // New incident = no fake investigation results.
-        setCaseData(buildPendingCase());
+          if (!cancelled) {
+            setIntakeData(intake);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to read intake data:", error);
+      }
 
-        return;
-      } catch {
-        sessionStorage.removeItem("caseguard-intake");
+      const urlCase = new URLSearchParams(window.location.search).get("case");
+
+      /*
+       * IMPORTANT:
+       * The dashboard/investigation API uses the human-readable
+       * CASEGUARD case number, e.g. CG-12345678.
+       *
+       * The Supabase UUID is stored separately as caseUuid.
+       */
+      const caseId =
+        urlCase ||
+        intake?.caseId ||
+        "CG-001";
+
+      try {
+        const data = await getCase(caseId);
+
+        if (!cancelled) {
+          setCaseData(adaptCaseResponse(data));
+        }
+      } catch (error) {
+        console.error("Failed to load dashboard case:", error);
+
+        /*
+         * Only use the temporary display if the real backend
+         * case cannot be loaded.
+         */
+        if (!cancelled && intake) {
+          setCaseData(buildPendingCase(intake.caseId || "NEW CASE"));
+        }
       }
     }
 
-    // Existing demo case fallback.
-    getCase("CG-001")
-      .then((data) => {
-        setCaseData(adaptCaseResponse(data));
-      })
-      .catch(() => {
-        setCaseData(mockCase);
-      });
+    loadDashboardCase();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const displayCaseId = intakeData ? "NEW CASE" : caseData.caseId;
+  /*
+   * Prefer the REAL backend case data.
+   * Intake data is only used for the submitted-incident summary.
+   */
+  const displayCaseId = caseData.caseId;
 
   const displayAmount = intakeData
     ? `₹${Number(intakeData.amount || 0).toLocaleString("en-IN")}`
     : caseData.disputedAmount;
 
-  const displayTransactionCount = intakeData
-    ? intakeData.transactionIds
-        .split(/[\n,]+/)
-        .map((item) => item.trim())
-        .filter(Boolean).length || 0
-    : caseData.transactions;
+  const displayTransactionCount = caseData.transactions ?? 0;
 
-  const displayEvidenceCount = intakeData
-    ? intakeData.evidence.trim()
-      ? intakeData.evidence
-          .split(/[\n,]+/)
-          .map((item) => item.trim())
-          .filter(Boolean).length || 1
-      : 0
-    : caseData.evidence;
+  const displayEvidenceCount = caseData.evidence ?? 0;
 
   const replanSteps = [
     "Existing evidence searched",
@@ -124,6 +146,10 @@ export default function Home() {
     setReplanStep(0);
 
     try {
+      /*
+       * Replanning is only available for the existing demo case.
+       * New intake cases should first complete their investigation.
+       */
       const caseId = intakeData ? null : "CG-001";
 
       if (caseId) {
@@ -182,7 +208,7 @@ export default function Home() {
       </header>
 
       <div className="mx-auto max-w-7xl space-y-6 px-6 py-6">
-        {/* NEW INTAKE SUMMARY */}
+        {/* SUBMITTED INCIDENT */}
         {intakeData && (
           <section className="rounded-xl border border-cyan-500/20 bg-cyan-500/[0.03]">
             <div className="border-b border-cyan-500/10 px-5 py-4">
@@ -190,22 +216,33 @@ export default function Home() {
                 Submitted Incident
               </p>
 
-              <h2 className="mt-1 font-semibold">{intakeData.incidentType}</h2>
+              <h2 className="mt-1 font-semibold">
+                {intakeData.incidentType}
+              </h2>
             </div>
 
             <div className="grid gap-4 p-5 md:grid-cols-2">
-              <Info label="Bank / Provider" value={intakeData.bank} />
+              <Info
+                label="Bank / Provider"
+                value={intakeData.bank}
+              />
+
               <Info
                 label="Account / Card"
                 value={intakeData.account || "Not provided"}
               />
+
               <Info
                 label="Incident Date"
                 value={`${intakeData.date || "Not provided"}${
                   intakeData.time ? ` · ${intakeData.time}` : ""
                 }`}
               />
-              <Info label="Reported Amount" value={displayAmount} />
+
+              <Info
+                label="Reported Amount"
+                value={displayAmount}
+              />
 
               <div className="md:col-span-2">
                 <p className="text-[10px] uppercase tracking-widest text-slate-500">
@@ -213,7 +250,7 @@ export default function Home() {
                 </p>
 
                 <p className="mt-2 text-sm leading-6 text-slate-300">
-                  {intakeData.description}
+                  {intakeData.description || "Not provided"}
                 </p>
               </div>
 
@@ -252,24 +289,46 @@ export default function Home() {
                 Case
               </p>
 
-              <h2 className="mt-1 text-lg font-semibold">#{displayCaseId}</h2>
+              <h2 className="mt-1 text-lg font-semibold">
+                #{displayCaseId}
+              </h2>
             </div>
 
             <div className="flex items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2">
               <ShieldAlert className="h-4 w-4 text-red-400" />
 
               <span className="text-xs font-bold tracking-wider text-red-400">
-                HIGH RISK
+                {String(caseData.risk).toUpperCase()}
               </span>
             </div>
           </div>
 
           <div className="grid grid-cols-2 divide-x divide-slate-800 sm:grid-cols-5">
-            <Stat label="Risk" value={caseData.risk} danger />
-            <Stat label="Disputed" value={displayAmount} />
-            <Stat label="Transactions" value={displayTransactionCount} />
-            <Stat label="Evidence" value={displayEvidenceCount} />
-            <Stat label="Status" value={intakeData ? "NEW" : caseData.status} />
+            <Stat
+              label="Risk"
+              value={String(caseData.risk).toUpperCase()}
+              danger={String(caseData.risk).toLowerCase() === "high"}
+            />
+
+            <Stat
+              label="Disputed"
+              value={displayAmount}
+            />
+
+            <Stat
+              label="Transactions"
+              value={displayTransactionCount}
+            />
+
+            <Stat
+              label="Evidence"
+              value={displayEvidenceCount}
+            />
+
+            <Stat
+              label="Status"
+              value={String(caseData.status).toUpperCase()}
+            />
           </div>
         </section>
 
@@ -282,7 +341,9 @@ export default function Home() {
                 System
               </p>
 
-              <h2 className="mt-1 font-semibold">Agent Status</h2>
+              <h2 className="mt-1 font-semibold">
+                Agent Status
+              </h2>
             </div>
 
             <div className="divide-y divide-slate-800/70">
@@ -291,7 +352,9 @@ export default function Home() {
                   key={agent.name}
                   className="flex items-center justify-between px-5 py-3"
                 >
-                  <span className="text-sm text-slate-300">{agent.name}</span>
+                  <span className="text-sm text-slate-300">
+                    {agent.name}
+                  </span>
 
                   <AgentStatus status={agent.status} />
                 </div>
@@ -307,16 +370,18 @@ export default function Home() {
                   Activity
                 </p>
 
-                <h2 className="mt-1 font-semibold">Live Agent Timeline</h2>
+                <h2 className="mt-1 font-semibold">
+                  Live Agent Timeline
+                </h2>
               </div>
 
               <Clock3 className="h-5 w-5 text-slate-500" />
             </div>
 
             <div className="space-y-1 p-5">
-              {caseData.timeline.map((event) => (
+              {caseData.timeline.map((event, index) => (
                 <div
-                  key={event.time}
+                  key={`${event.time}-${event.agent}-${index}`}
                   className="grid gap-1 rounded-lg px-3 py-3 hover:bg-slate-800/30 sm:grid-cols-[75px_100px_1fr] sm:gap-3"
                 >
                   <span className="font-mono text-xs text-slate-500">
@@ -344,7 +409,9 @@ export default function Home() {
                 Investigation Output
               </p>
 
-              <h2 className="mt-1 font-semibold">Findings</h2>
+              <h2 className="mt-1 font-semibold">
+                Findings
+              </h2>
             </div>
 
             <div className="space-y-3 p-5">
@@ -356,7 +423,9 @@ export default function Home() {
                   >
                     <AlertTriangle className="h-4 w-4 text-amber-400" />
 
-                    <span className="text-sm text-slate-300">{finding}</span>
+                    <span className="text-sm text-slate-300">
+                      {finding}
+                    </span>
                   </div>
                 ))
               ) : (
@@ -375,17 +444,21 @@ export default function Home() {
                 Evidence Validation
               </p>
 
-              <h2 className="mt-1 font-semibold">Verification</h2>
+              <h2 className="mt-1 font-semibold">
+                Verification
+              </h2>
             </div>
 
             <div className="space-y-3 p-5">
               {caseData.verification.length > 0 ? (
-                caseData.verification.map((item) => (
+                caseData.verification.map((item, index) => (
                   <div
-                    key={item}
+                    key={`${item}-${index}`}
                     className="flex items-center justify-between rounded-lg border border-emerald-500/10 bg-emerald-500/5 p-3"
                   >
-                    <span className="text-sm text-slate-300">{item}</span>
+                    <span className="text-sm text-slate-300">
+                      {item}
+                    </span>
 
                     <span className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
                       <Check className="h-4 w-4" />
@@ -419,11 +492,13 @@ export default function Home() {
               {decision ? (
                 <p className="mt-2 text-sm text-slate-400">
                   Decision recorded:{" "}
-                  <span className="font-semibold text-white">{decision}</span>
+                  <span className="font-semibold text-white">
+                    {decision}
+                  </span>
                 </p>
               ) : (
                 <p className="mt-2 text-sm text-slate-500">
-                  {intakeData
+                  {caseData.findings.length === 0
                     ? "Investigation has not completed yet. Human approval will appear after verification."
                     : "AI investigation is complete. A human must authorize the consequential action."}
                 </p>
@@ -474,7 +549,9 @@ export default function Home() {
                   }`}
                 />
 
-                <h2 className="font-semibold">Replanning Event</h2>
+                <h2 className="font-semibold">
+                  Replanning Event
+                </h2>
               </div>
 
               <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-amber-400">
@@ -564,7 +641,13 @@ export default function Home() {
   );
 }
 
-function Info({ label, value }: { label: string; value: string }) {
+function Info({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
   return (
     <div>
       <p className="text-[10px] uppercase tracking-widest text-slate-500">
@@ -603,14 +686,16 @@ function EvidenceModal({
       aria-modal="true"
       aria-labelledby="evidence-title"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
       }}
     >
       <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-slate-700 bg-[#0d1219] shadow-2xl">
         <div className="flex items-start justify-between border-b border-slate-800 px-5 py-4">
           <div>
             <p className="text-xs uppercase tracking-widest text-cyan-400">
-              Evidence Package · {intakeData ? "NEW CASE" : "CG-001"}
+              Evidence Package · {displayEvidenceCaseLabel(intakeData)}
             </p>
 
             <h2
@@ -689,6 +774,12 @@ function EvidenceModal({
   );
 }
 
+function displayEvidenceCaseLabel(
+  intakeData: IntakeData | null,
+) {
+  return intakeData?.caseId || "CG-001";
+}
+
 function Stat({
   label,
   value,
@@ -715,7 +806,11 @@ function Stat({
   );
 }
 
-function AgentStatus({ status }: { status: string }) {
+function AgentStatus({
+  status,
+}: {
+  status: string;
+}) {
   if (status === "complete") {
     return (
       <span className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
@@ -742,7 +837,13 @@ function AgentStatus({ status }: { status: string }) {
   );
 }
 
-function ReplanStep({ text, active }: { text: string; active: boolean }) {
+function ReplanStep({
+  text,
+  active,
+}: {
+  text: string;
+  active: boolean;
+}) {
   return (
     <div
       className={`flex items-center gap-3 text-sm transition-all duration-500 ${
