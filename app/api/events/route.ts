@@ -1,5 +1,6 @@
 import { apiErrorResponse, ApiError, parseCaseId, readJson, requireApiClient } from "@/lib/api/http";
 import { loadCaseState } from "@/lib/case/store";
+import { presentCaseState } from "@/lib/case/response";
 import { CASE_ID } from "@/lib/case/synthetic";
 import { replanCase, recordCaseEvent } from "@/lib/orchestration/engine";
 import type { CaseEvent } from "@/lib/types/agents";
@@ -12,7 +13,7 @@ export async function POST(request: Request) {
     const eventType = body.eventType ?? body.type;
     const description = body.description ?? body.message;
     if (
-      eventType !== "bank_response" ||
+      !["bank_response", "BANK_RESPONSE_RECEIVED"].includes(String(eventType)) ||
       typeof description !== "string" ||
       !/additional evidence required/i.test(description.trim()) ||
       description.trim().length > 500
@@ -27,9 +28,16 @@ export async function POST(request: Request) {
     const event: CaseEvent = {
       id: crypto.randomUUID(),
       caseId,
-      eventType: "bank_response",
+      eventType: "BANK_RESPONSE_RECEIVED",
       description: description.trim(),
-      metadata: { source: "synthetic_demo", externalConnectionUsed: false },
+      metadata: {
+        source: "synthetic_demo",
+        externalConnectionUsed: false,
+        agentName: "system",
+        status: "received",
+        message: description.trim(),
+        timestamp: new Date().toISOString(),
+      },
       createdAt: new Date().toISOString(),
     };
     const eventWarnings = await recordCaseEvent(client, state, event);
@@ -42,11 +50,15 @@ export async function POST(request: Request) {
         ]),
       ).values(),
     ];
+    const caseView = presentCaseState(outcome.state);
 
     return Response.json(
       {
         event,
         ...outcome,
+        ...caseView,
+        state: caseView,
+        case: caseView,
         persistenceWarnings,
         completed: outcome.agentErrors.length === 0,
       },

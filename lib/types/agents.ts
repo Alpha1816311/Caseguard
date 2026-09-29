@@ -7,6 +7,8 @@ export type AgentName =
   | "risk"
   | "compliance"
   | "action_planner"
+  | "follow_up"
+  | "recovery"
   | "verification"
   | "replanner";
 

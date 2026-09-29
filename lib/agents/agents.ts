@@ -363,7 +363,56 @@ export async function runComplianceAgent(
     ],
     confidence: 1,
     nextAgents: ["action_planner", "verification"],
-    data: { prohibitedAutonomousActions: ["transfer_funds", "freeze_account", "accuse_person", "submit_legal_complaint", "contact_authorities"] },
+    data: {
+      prohibitedAutonomousActions: ["transfer_funds", "freeze_account", "accuse_person", "submit_legal_complaint", "contact_authorities"],
+      regulatoryStatus: "Official source verification required",
+    },
+  });
+}
+
+export async function runFollowUpAgent(
+  state: CaseState,
+  assignedTask: AgentTask,
+): Promise<AgentResult> {
+  const followUpAction = action(
+    "Review customer follow-up draft",
+    "Review a proposed case-status update before any customer contact. No message is sent automatically.",
+    "customer",
+    "required",
+    state.evidence.map((item) => item.id),
+  );
+  return result(state, {
+    agent: "follow_up",
+    task: assignedTask.description,
+    summary: "Prepared a customer follow-up recommendation for human review; no external contact was made.",
+    actions: [followUpAction],
+    evidenceIds: state.evidence.map((item) => item.id),
+    confidence: 0.9,
+    nextAgents: [],
+    data: { externalContactMade: false, requiresHumanApproval: true },
+  });
+}
+
+export async function runRecoveryAgent(
+  state: CaseState,
+  assignedTask: AgentTask,
+): Promise<AgentResult> {
+  const recoveryAction = action(
+    "Review recovery options",
+    `Review recovery options for the disputed INR ${state.disputedAmount.toLocaleString("en-IN")}. This is a recommendation only; no funds are transferred or recovery claim submitted.`,
+    "financial",
+    "required",
+    state.evidence.map((item) => item.id),
+  );
+  return result(state, {
+    agent: "recovery",
+    task: assignedTask.description,
+    summary: "Prepared recovery options for authorized human review; no financial action was taken.",
+    actions: [recoveryAction],
+    evidenceIds: state.evidence.map((item) => item.id),
+    confidence: 0.9,
+    nextAgents: [],
+    data: { fundsTransferred: false, requiresHumanApproval: true },
   });
 }
 

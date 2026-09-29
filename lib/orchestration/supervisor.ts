@@ -75,7 +75,7 @@ export function selectSupervisorStep(
 ): SupervisorStep | null {
   const newBankEvent = [...state.events]
     .reverse()
-    .find((event) => event.eventType === "bank_response");
+    .find((event) => ["bank_response", "BANK_RESPONSE_RECEIVED"].includes(event.eventType));
   if (newBankEvent) {
     return nextEventStep(state, newBankEvent, attempted);
   }

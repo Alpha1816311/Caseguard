@@ -16,6 +16,8 @@ const allowedAgents: AgentName[] = [
   "risk",
   "compliance",
   "action_planner",
+  "follow_up",
+  "recovery",
   "verification",
   "replanner",
 ];

@@ -2,8 +2,10 @@ import {
   runActionPlannerAgent,
   runComplianceAgent,
   runEvidenceAgent,
+  runFollowUpAgent,
   runForensicsAgent,
   runInvestigationAgent,
+  runRecoveryAgent,
   runReplannerAgent,
   runRiskAgent,
   runSupervisorAgent,
@@ -45,6 +47,21 @@ const taskStatus = (task: AgentTask, status: AgentTask["status"]): AgentTask => 
 function uniqueById<T extends { id: string }>(items: T[]): T[] {
   return [...new Map(items.map((item) => [item.id, item])).values()];
 }
+
+const eventTypeByAgent: Record<AgentName, string> = {
+  supervisor: "SUPERVISOR_PLANNING",
+  triage: "TRIAGE_COMPLETED",
+  transaction_forensics: "FORENSICS_COMPLETED",
+  evidence: "EVIDENCE_ANALYSIS_COMPLETED",
+  investigation: "INVESTIGATION_COMPLETED",
+  risk: "RISK_ANALYSIS_COMPLETED",
+  compliance: "COMPLIANCE_CHECKED",
+  action_planner: "ACTION_PREPARED",
+  follow_up: "FOLLOW_UP_PREPARED",
+  recovery: "RECOVERY_OPTIONS_PREPARED",
+  verification: "VERIFICATION_COMPLETED",
+  replanner: "REPLAN_COMPLETED",
+};
 
 function failedResult(agent: AgentName, error: unknown): { result: AgentResult; message: string } {
   const message = error instanceof Error ? error.message : "Unknown agent execution error.";
@@ -89,12 +106,123 @@ async function callAgent(
       return runComplianceAgent(state, task);
     case "action_planner":
       return runActionPlannerAgent(state, task);
+    case "follow_up":
+      return runFollowUpAgent(state, task);
+    case "recovery":
+      return runRecoveryAgent(state, task);
     case "verification":
       return runVerificationAgent(state, task);
     case "replanner":
       if (!event) throw new Error("Replanner requires a triggering case event.");
       return runReplannerAgent(state, task, event);
   }
+}
+
+function eventDetails(
+  state: CaseState,
+  agent: AgentName,
+  result: AgentResult,
+  triggerEvent: CaseEvent | null,
+  createdAt: string,
+): CaseEvent[] {
+  if (!triggerEvent) {
+    if (agent !== "verification" || result.data?.verified !== true) return [];
+    return [{
+      id: `event-${crypto.randomUUID()}`,
+      caseId: state.caseId,
+      eventType: "CASE_COMPLETED",
+      description: "Initial investigation completed with all required verification checks passed.",
+      metadata: {
+        agentName: "supervisor",
+        status: "completed",
+        message: result.summary,
+        verificationIds: ((result.data.verifications as Array<{ id: string }> | undefined) ?? []).map((item) => item.id),
+        timestamp: createdAt,
+      },
+      createdAt,
+    }];
+  }
+
+  const baseMetadata = {
+    agent,
+    agentName: agent,
+    status: result.status,
+    triggerEventId: triggerEvent.id,
+    timestamp: createdAt,
+  };
+  const details: Array<{
+    eventType: string;
+    message: string;
+    metadata?: Record<string, unknown>;
+  }> = [];
+
+  if (agent === "evidence") {
+    const statement = result.data?.selectedBankStatement;
+    details.push({
+      eventType: "EVIDENCE_SEARCHED",
+      message: "Searched evidence already associated with this case.",
+      metadata: { evidenceIds: result.evidenceIds },
+    });
+    if (statement) {
+      details.push({
+        eventType: "EVIDENCE_FOUND",
+        message: "Found E01 Bank Statement in the existing case evidence.",
+        metadata: { evidenceId: "E01" },
+      });
+    }
+  }
+
+  if (agent === "transaction_forensics") {
+    details.push({
+      eventType: "TRANSACTION_CROSSCHECK",
+      message: result.summary,
+      metadata: {
+        ...(result.data?.statementCrossCheck as Record<string, unknown> | undefined),
+        transactionIds: state.transactions.map((transaction) => transaction.id),
+        disputedAmount: state.disputedAmount,
+      },
+    });
+  }
+
+  if (agent === "action_planner" && result.data?.evidencePackage) {
+    details.push({
+      eventType: "EVIDENCE_PACKAGE_PREPARED",
+      message: result.summary,
+      metadata: { evidencePackage: result.data.evidencePackage },
+    });
+    if (result.actions.some((item) => item.approval === "required")) {
+      details.push({
+        eventType: "HUMAN_REVIEW_REQUIRED",
+        message: "Evidence package is awaiting an authorized human reviewer.",
+        metadata: {
+          status: "pending_approval",
+          actionIds: result.actions.map((item) => item.id),
+          requiresApproval: true,
+        },
+      });
+    }
+  }
+
+  return details.map((detail) => ({
+    id: `event-${crypto.randomUUID()}`,
+    caseId: state.caseId,
+    eventType: detail.eventType,
+    description: detail.message,
+    metadata: { ...baseMetadata, ...detail.metadata },
+    createdAt,
+  }));
+}
+
+async function emitCaseEvent(
+  client: CaseDatabaseClient,
+  state: CaseState,
+  event: CaseEvent,
+): Promise<PersistenceWarning[]> {
+  state.events = uniqueById([...state.events, event]);
+  state.revision += 1;
+  state.updatedAt = event.createdAt;
+  saveCaseState(state);
+  return persistCaseEvent(client, event);
 }
 
 async function executeAgent(
@@ -108,6 +236,23 @@ async function executeAgent(
 ): Promise<void> {
   const startedAt = new Date().toISOString();
   const inputState = structuredClone(state);
+  if (agent === "replanner" && event) {
+    const replanStarted: CaseEvent = {
+      id: `event-${crypto.randomUUID()}`,
+      caseId: state.caseId,
+      eventType: "REPLAN_STARTED",
+      description: "Supervisor started replanning in response to the bank evidence request.",
+      metadata: {
+        agentName: "replanner",
+        status: "started",
+        message: task.title,
+        triggerEventId: event.id,
+        timestamp: startedAt,
+      },
+      createdAt: startedAt,
+    };
+    outcome.persistenceWarnings.push(...(await emitCaseEvent(client, state, replanStarted)));
+  }
   let result: AgentResult;
   let errorMessage: string | null = null;
   try {
@@ -164,22 +309,28 @@ async function executeAgent(
   const caseEvent: CaseEvent = {
     id: `event-${crypto.randomUUID()}`,
     caseId: state.caseId,
-    eventType: result.status === "failed" ? "agent_failed" : "agent_completed",
+    eventType: result.status === "failed"
+      ? `${agent.toUpperCase()}_FAILED`
+      : eventTypeByAgent[agent],
     description: `${agent} ${result.status === "failed" ? "failed" : "completed"}: ${task.title}`,
     metadata: {
       agent,
+      agentName: agent,
       taskId: task.id,
       status: result.status,
+      message: result.summary,
       findingIds: result.findings.map((item) => item.id),
       actionIds: result.actions.map((item) => item.id),
       evidenceIds: result.evidenceIds,
       triggerEventId: event?.id ?? null,
       requiresHumanApproval: result.actions.some((item) => item.approval === "required"),
+      timestamp: completedAt,
     },
     createdAt: completedAt,
   };
-  state.events = uniqueById([...state.events, caseEvent]);
-  state.revision += 1;
+  const additionalEvents = eventDetails(state, agent, result, event, completedAt);
+  state.events = uniqueById([...state.events, caseEvent, ...additionalEvents]);
+  state.revision += 1 + additionalEvents.length;
   state.updatedAt = completedAt;
   saveCaseState(state);
 
@@ -196,6 +347,7 @@ async function executeAgent(
   outcome.persistenceWarnings.push(
     ...(await persistAgentRun(client, run, completedTask, result)),
     ...(await persistCaseEvent(client, caseEvent)),
+    ...(await Promise.all(additionalEvents.map((item) => persistCaseEvent(client, item)))).flat(),
   );
   outcome.executedAgents.push(agent);
 }
@@ -204,7 +356,7 @@ function latestBankResponse(state: CaseState): CaseEvent | null {
   return (
     [...state.events]
       .reverse()
-      .find((event) => event.eventType === "bank_response") ?? null
+      .find((event) => ["bank_response", "BANK_RESPONSE_RECEIVED"].includes(event.eventType)) ?? null
   );
 }
 
@@ -240,6 +392,23 @@ async function advance(
     agentErrors: [],
     executedAgents: [],
   };
+  if (outcome.state.events.length === 0 && outcome.state.agentResults.length === 0) {
+    const startedAt = new Date().toISOString();
+    for (const [eventType, description, agentName, status] of [
+      ["CASE_CREATED", "Synthetic case CG-001 created.", "system", "completed"],
+      ["INVESTIGATION_STARTED", "Initial case investigation started.", "supervisor", "started"],
+    ]) {
+      const event: CaseEvent = {
+        id: `event-${crypto.randomUUID()}`,
+        caseId: outcome.state.caseId,
+        eventType,
+        description,
+        metadata: { agentName, status, message: description, timestamp: startedAt },
+        createdAt: startedAt,
+      };
+      outcome.persistenceWarnings.push(...(await emitCaseEvent(client, outcome.state, event)));
+    }
+  }
   const attempted = new Set<string>();
 
   for (let iteration = 0; iteration < 24; iteration += 1) {
