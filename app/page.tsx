@@ -21,7 +21,9 @@ export default function Home() {
   useEffect(() => {
     getCase("CG-001")
       .then((data) => {
-        setCaseData(adaptCaseResponse(data));
+        const updatedCase = adaptCaseResponse(data);
+        setCaseData(updatedCase);
+        setReplanStep(updatedCase.replanStep);
       })
       .catch(() => {
         setCaseData(mockCase);
@@ -159,9 +161,9 @@ export default function Home() {
             </div>
 
             <div className="space-y-1 p-5">
-              {caseData.timeline.map((event) => (
+              {caseData.timeline.map((event, index) => (
                 <div
-                  key={`${event.time}-${event.message}`}
+                  key={`${event.time}-${event.agent}-${index}`}
                   className="grid gap-1 rounded-lg px-3 py-3 hover:bg-slate-800/30 sm:grid-cols-[75px_100px_1fr] sm:gap-3"
                 >
                   <span className="font-mono text-xs text-slate-500">
